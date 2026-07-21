@@ -1,0 +1,43 @@
+{
+  "name": "@deadfinder/vscode",
+  "displayName": "Vue DeadFinder",
+  "description": "IDE File Decoration and Dependency Tracer for Vue 3 & TypeScript",
+  "version": "1.0.0",
+  "publisher": "deadfinder",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": [
+    "Linters",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "deadfinder.explain",
+        "title": "DeadFinder: Explain Why Dead"
+      }
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "deadfinder.explain",
+          "when": "resourceExtname == .vue || resourceExtname == .ts || resourceExtname == .js || resourceExtname == .tsx || resourceExtname == .jsx",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "@deadfinder/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.74.0",
+    "@types/node": "^20.8.2"
+  }
+}

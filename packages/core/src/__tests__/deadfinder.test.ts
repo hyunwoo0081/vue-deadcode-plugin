@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import path from 'path';
+import fs from 'fs';
 import { resolveEntries } from '../resolver.js';
 import { parseFile } from '../parser.js';
 import { indexSource } from '../indexer.js';
@@ -58,5 +59,48 @@ describe('Vue DeadFinder Core Engine', () => {
 
     const unusedHelper = utilsReport?.symbols.find(s => s.name === 'unusedHelper');
     expect(unusedHelper?.status).toBe('ALIVE');
+  });
+
+  it('should incrementally update when a file is saved', () => {
+    const tempDir = path.resolve(__dirname, '../../../../tests/fixtures/temp-mock-project-' + Date.now());
+    fs.mkdirSync(tempDir, { recursive: true });
+    fs.cpSync(mockProjectPath, tempDir, { recursive: true });
+
+    try {
+      const analyzer = new DeadCodeAnalyzer({ projectPath: tempDir });
+      const initialReport = analyzer.analyze();
+
+      const orphanReport = initialReport.files.find(f => f.path.replace(/\\/g, '/').endsWith('src/components/OrphanComponent.vue'));
+      expect(orphanReport?.status).toBe('DEAD');
+
+      // Now modify App.vue in tempDir to reference OrphanComponent in template
+      const appVuePath = path.join(tempDir, 'src/App.vue');
+      const newAppContent = `<script setup lang="ts">
+import MyButton from './components/MyButton.vue';
+import UnusedComponent from './components/UnusedComponent.vue';
+import OrphanComponent from './components/OrphanComponent.vue';
+</script>
+
+<template>
+  <div>
+    <MyButton />
+    <OrphanComponent />
+  </div>
+</template>`;
+      fs.writeFileSync(appVuePath, newAppContent, 'utf-8');
+
+      // Run incremental update
+      const updatedReport = analyzer.updateFile(appVuePath);
+
+      // Verify that OrphanComponent is now ALIVE!
+      const updatedOrphan = updatedReport.files.find(f => f.path.replace(/\\/g, '/').endsWith('src/components/OrphanComponent.vue'));
+      expect(updatedOrphan?.status).toBe('ALIVE');
+
+      // Verify that UnusedComponent is still DEAD
+      const updatedUnused = updatedReport.files.find(f => f.path.replace(/\\/g, '/').endsWith('src/components/UnusedComponent.vue'));
+      expect(updatedUnused?.status).toBe('DEAD');
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });

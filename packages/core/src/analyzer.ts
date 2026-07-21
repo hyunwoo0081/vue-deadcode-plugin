@@ -18,9 +18,15 @@ export class DeadCodeAnalyzer {
   private entryPatterns?: string[];
   private excludePatterns: string[];
   public graph: BiDirectionalGraph = new BiDirectionalGraph();
+  
+  // Caches for incremental analysis
+  private parsedFiles = new Map<string, ParsedFile>();
+  private fileIndexes = new Map<string, FileIndex>();
+  private entries: string[] = [];
+  private allFiles: string[] = [];
 
   constructor(options: AnalyzerOptions) {
-    this.projectPath = path.resolve(options.projectPath);
+    this.projectPath = path.resolve(options.projectPath).replace(/\\/g, '/');
     this.entryPatterns = options.entryPatterns;
     this.excludePatterns = options.excludePatterns || [
       '**/node_modules/**',
@@ -32,40 +38,90 @@ export class DeadCodeAnalyzer {
 
   analyze(): DeadCodeReport {
     // 1. Resolve Entry Points
-    const entries = resolveEntries(this.projectPath, this.entryPatterns);
+    this.entries = resolveEntries(this.projectPath, this.entryPatterns);
     
     // 2. Find all source files
     const filePatterns = ['**/*.vue', '**/*.ts', '**/*.js', '**/*.tsx', '**/*.jsx'];
-    const allFiles = fg.sync(filePatterns, {
+    this.allFiles = fg.sync(filePatterns, {
       cwd: this.projectPath,
       absolute: true,
       ignore: this.excludePatterns
-    });
+    }).map(f => f.replace(/\\/g, '/'));
 
-    const parsedFiles = new Map<string, ParsedFile>();
-    const fileIndexes = new Map<string, FileIndex>();
+    // Clear caches
+    this.parsedFiles.clear();
+    this.fileIndexes.clear();
+
+    // Parse and Index all files
+    for (const filePath of this.allFiles) {
+      try {
+        const parsed = parseFile(filePath);
+        this.parsedFiles.set(filePath, parsed);
+
+        const indexed = indexSource(filePath, parsed.scriptContent, parsed.templateTags);
+        this.fileIndexes.set(filePath, indexed);
+      } catch (err) {
+        // Failed to parse/index file, skip or log
+      }
+    }
+
+    this.buildGraph();
+    return this.generateReport();
+  }
+
+  updateFile(filePath: string): DeadCodeReport {
+    const normalizedPath = filePath.replace(/\\/g, '/');
+
+    try {
+      if (fs.existsSync(normalizedPath) && fs.statSync(normalizedPath).isFile()) {
+        // Re-parse and re-index only the changed file
+        const parsed = parseFile(normalizedPath);
+        this.parsedFiles.set(normalizedPath, parsed);
+
+        const indexed = indexSource(normalizedPath, parsed.scriptContent, parsed.templateTags);
+        this.fileIndexes.set(normalizedPath, indexed);
+
+        if (!this.allFiles.includes(normalizedPath)) {
+          this.allFiles.push(normalizedPath);
+        }
+      } else {
+        // File was deleted
+        this.parsedFiles.delete(normalizedPath);
+        this.fileIndexes.delete(normalizedPath);
+        this.allFiles = this.allFiles.filter(f => f !== normalizedPath);
+      }
+    } catch (err) {
+      // Graceful fallback if file read/parse fails
+      this.parsedFiles.delete(normalizedPath);
+      this.fileIndexes.delete(normalizedPath);
+      this.allFiles = this.allFiles.filter(f => f !== normalizedPath);
+    }
+
+    // Re-resolve entries dynamically if configuration or entries might have changed
+    this.entries = resolveEntries(this.projectPath, this.entryPatterns);
+
+    this.buildGraph();
+    return this.generateReport();
+  }
+
+  private buildGraph(): void {
     this.graph = new BiDirectionalGraph();
     const graph = this.graph;
 
-    // Parse and Index all files
-    for (const filePath of allFiles) {
-      try {
-        const parsed = parseFile(filePath);
-        parsedFiles.set(filePath, parsed);
+    // Add nodes
+    for (const filePath of this.allFiles) {
+      const isEntry = this.entries.includes(filePath);
+      const fileNodeId = `file:///${filePath}`;
+      
+      graph.addNode({
+        id: fileNodeId,
+        type: NodeType.FILE,
+        path: filePath,
+        isEntry
+      });
 
-        const indexed = indexSource(filePath, parsed.scriptContent, parsed.templateTags);
-        fileIndexes.set(filePath, indexed);
-
-        // Add File node to graph
-        const fileNodeId = `file:///${filePath.replace(/\\/g, '/')}`;
-        const isEntry = entries.includes(filePath);
-        graph.addNode({
-          id: fileNodeId,
-          type: NodeType.FILE,
-          path: filePath,
-          isEntry
-        });
-
+      const indexed = this.fileIndexes.get(filePath);
+      if (indexed) {
         // Add Symbol nodes for local exports
         for (const exp of indexed.exports) {
           if (exp.name !== '*' && !exp.isReExport) {
@@ -79,30 +135,27 @@ export class DeadCodeAnalyzer {
             });
           }
         }
-      } catch (err) {
-        // Failed to parse/index file, skip or log
       }
     }
 
     // Check if any file has dynamic components
     let hasGlobalDynamicComponents = false;
-    for (const parsed of parsedFiles.values()) {
+    for (const parsed of this.parsedFiles.values()) {
       if (parsed.hasDynamicComponents) {
         hasGlobalDynamicComponents = true;
         break;
       }
     }
 
-    // 3. Construct Edges
-    for (const filePath of allFiles) {
-      const parsed = parsedFiles.get(filePath);
-      const indexed = fileIndexes.get(filePath);
+    // Construct Edges
+    for (const filePath of this.allFiles) {
+      const parsed = this.parsedFiles.get(filePath);
+      const indexed = this.fileIndexes.get(filePath);
       if (!parsed || !indexed) continue;
 
-      const fileNodeId = `file:///${filePath.replace(/\\/g, '/')}`;
+      const fileNodeId = `file:///${filePath}`;
 
       // A) Parent link edges: exported symbol -> parent file
-      // B) File level reference edges: parent file -> referenced symbol
       for (const exp of indexed.exports) {
         if (exp.name !== '*' && !exp.isReExport) {
           const symNodeId = `${fileNodeId}#${exp.name}`;
@@ -110,11 +163,12 @@ export class DeadCodeAnalyzer {
             from: symNodeId,
             to: fileNodeId,
             confidence: Confidence.HIGH,
-            type: 'IMPORT' // or parent link
+            type: 'IMPORT'
           });
         }
       }
 
+      // B) File level reference edges: parent file -> referenced symbol
       for (const ref of indexed.fileLevelReferences) {
         const toSymbolNodeId = `${fileNodeId}#${ref}`;
         graph.addEdge({
@@ -140,22 +194,20 @@ export class DeadCodeAnalyzer {
       // D) Imports: local imported symbol name -> target exported symbol
       for (const imp of indexed.imports) {
         const targetPath = this.resolveModulePath(filePath, imp.moduleSpecifier);
-        if (targetPath && fileIndexes.has(targetPath)) {
-          const targetFileNodeId = `file:///${targetPath.replace(/\\/g, '/')}`;
+        if (targetPath && this.fileIndexes.has(targetPath)) {
+          const targetFileNodeId = `file:///${targetPath}`;
 
           for (const sym of imp.importedSymbols) {
             const localSymNodeId = `${fileNodeId}#${sym.localName}`;
             
             if (sym.isNamespace) {
-              // Namespace import: link namespace symbol to the target file itself
               graph.addEdge({
                 from: localSymNodeId,
                 to: targetFileNodeId,
                 confidence: Confidence.MEDIUM,
                 type: 'IMPORT'
               });
-              // Also link namespace symbol to all exports of the target file
-              const targetIndex = fileIndexes.get(targetPath);
+              const targetIndex = this.fileIndexes.get(targetPath);
               if (targetIndex) {
                 for (const targetExp of targetIndex.exports) {
                   if (targetExp.name !== '*') {
@@ -169,7 +221,6 @@ export class DeadCodeAnalyzer {
                 }
               }
             } else if (sym.isDefault) {
-              // Default import: link to default export of target file
               graph.addEdge({
                 from: localSymNodeId,
                 to: `${targetFileNodeId}#default`,
@@ -177,7 +228,6 @@ export class DeadCodeAnalyzer {
                 type: 'IMPORT'
               });
             } else {
-              // Named import
               const sourceName = sym.propertyName ?? sym.localName;
               graph.addEdge({
                 from: localSymNodeId,
@@ -194,16 +244,14 @@ export class DeadCodeAnalyzer {
       for (const exp of indexed.exports) {
         if (exp.isReExport && exp.reExportModule) {
           const targetPath = this.resolveModulePath(filePath, exp.reExportModule);
-          if (targetPath && fileIndexes.has(targetPath)) {
-            const targetFileNodeId = `file:///${targetPath.replace(/\\/g, '/')}`;
+          if (targetPath && this.fileIndexes.has(targetPath)) {
+            const targetFileNodeId = `file:///${targetPath}`;
 
             if (exp.name === '*') {
-              // Star re-export: copy B's exports to A
-              const targetIndex = fileIndexes.get(targetPath);
+              const targetIndex = this.fileIndexes.get(targetPath);
               if (targetIndex) {
                 for (const targetExp of targetIndex.exports) {
                   if (targetExp.name !== '*') {
-                    // Link A#targetExp.name -> B#targetExp.name
                     const sourceNodeId = `${fileNodeId}#${targetExp.name}`;
                     const targetNodeId = `${targetFileNodeId}#${targetExp.name}`;
                     graph.addEdge({
@@ -216,7 +264,6 @@ export class DeadCodeAnalyzer {
                 }
               }
             } else if (exp.reExportSymbol) {
-              // Named re-export
               const sourceNodeId = `${fileNodeId}#${exp.name}`;
               const targetNodeId = `${targetFileNodeId}#${exp.reExportSymbol}`;
               graph.addEdge({
@@ -232,28 +279,23 @@ export class DeadCodeAnalyzer {
     }
 
     // F) Handle global dynamic components or resolveComponent
-    // If hasGlobalDynamicComponents, we want to add LOW/UNKNOWN confidence edges
-    // from the files that contain dynamic components to all component files under "components/"
     if (hasGlobalDynamicComponents) {
-      const componentFiles = allFiles.filter(f => {
-        const normPath = f.replace(/\\/g, '/');
-        return normPath.includes('/components/') && f.endsWith('.vue');
+      const componentFiles = this.allFiles.filter(f => {
+        return f.includes('/components/') && f.endsWith('.vue');
       });
 
-      for (const filePath of allFiles) {
-        const parsed = parsedFiles.get(filePath);
+      for (const filePath of this.allFiles) {
+        const parsed = this.parsedFiles.get(filePath);
         if (parsed?.hasDynamicComponents) {
-          const fileNodeId = `file:///${filePath.replace(/\\/g, '/')}`;
+          const fileNodeId = `file:///${filePath}`;
           for (const compFile of componentFiles) {
-            const compFileNodeId = `file:///${compFile.replace(/\\/g, '/')}`;
-            // Add a virtual edge with UNKNOWN confidence
+            const compFileNodeId = `file:///${compFile}`;
             graph.addEdge({
               from: fileNodeId,
               to: compFileNodeId,
               confidence: Confidence.UNKNOWN,
               type: 'TEMPLATE_REF'
             });
-            // Also link to default export of that component file
             graph.addEdge({
               from: fileNodeId,
               to: `${compFileNodeId}#default`,
@@ -264,37 +306,42 @@ export class DeadCodeAnalyzer {
         }
       }
     }
+  }
 
-    // 4. Run Reachability Algorithm
+  private generateReport(): DeadCodeReport {
+    const graph = this.graph;
     const reachability = graph.computeReachability();
     const aliveNodeIds = reachability.aliveNodeIds;
 
-    // 5. Generate Report
+    let hasGlobalDynamicComponents = false;
+    for (const parsed of this.parsedFiles.values()) {
+      if (parsed.hasDynamicComponents) {
+        hasGlobalDynamicComponents = true;
+        break;
+      }
+    }
+
     const fileReports: FileAnalysisReport[] = [];
     let deadFilesCount = 0;
     let deadSymbolsCount = 0;
 
-    for (const filePath of allFiles) {
-      const fileNodeId = `file:///${filePath.replace(/\\/g, '/')}`;
+    for (const filePath of this.allFiles) {
+      const fileNodeId = `file:///${filePath}`;
       const isAlive = aliveNodeIds.has(fileNodeId);
-      const fileIndex = fileIndexes.get(filePath);
+      const fileIndex = this.fileIndexes.get(filePath);
 
       let status: 'ALIVE' | 'DEAD' | 'UNKNOWN' = isAlive ? 'ALIVE' : 'DEAD';
       let fileConfidence = Confidence.HIGH;
 
-      // Extract trace path
       const rawTrace = reachability.traces.get(fileNodeId);
       const tracePath = rawTrace ? rawTrace.map((t: string) => this.cleanNodeId(t)) : undefined;
 
-      // If the file is alive, check the lowest confidence in the trace path to determine file confidence
       if (isAlive && rawTrace) {
         fileConfidence = this.computePathConfidence(rawTrace, graph);
       }
 
-      // Check if it's dead, but should be UNKNOWN due to dynamic components/resolveComponent
       if (!isAlive) {
-        // If the path contains '/components/' and we have global dynamic components, mark UNKNOWN
-        const isComponent = filePath.replace(/\\/g, '/').includes('/components/') && filePath.endsWith('.vue');
+        const isComponent = filePath.includes('/components/') && filePath.endsWith('.vue');
         if (isComponent && hasGlobalDynamicComponents) {
           status = 'UNKNOWN';
           fileConfidence = Confidence.UNKNOWN;
@@ -321,7 +368,6 @@ export class DeadCodeAnalyzer {
 
           if (!isSymAlive) {
             if (status === 'UNKNOWN') {
-              // If the file itself is UNKNOWN status due to dynamic rules, its symbols are also UNKNOWN confidence
               symConfidence = Confidence.UNKNOWN;
             } else {
               deadSymbolsCount++;
@@ -360,7 +406,7 @@ export class DeadCodeAnalyzer {
       version: '1.0.0',
       engine: '@deadfinder/graph-v3',
       summary: {
-        totalFiles: allFiles.length,
+        totalFiles: this.allFiles.length,
         deadFilesCount,
         deadSymbolsCount
       },
