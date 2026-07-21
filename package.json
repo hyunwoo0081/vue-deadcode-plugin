@@ -1,0 +1,12 @@
+{
+  "name": "vue-deadfinder",
+  "private": true,
+  "scripts": {
+    "build": "pnpm --filter \"./packages/*\" run build",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.2.2",
+    "vitest": "^1.0.0"
+  }
+}

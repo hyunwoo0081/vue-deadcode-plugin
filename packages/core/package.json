@@ -1,0 +1,19 @@
+{
+  "name": "@deadfinder/core",
+  "version": "1.0.0",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@vue/compiler-core": "^3.4.0",
+    "@vue/compiler-sfc": "^3.4.0",
+    "fast-glob": "^3.3.2",
+    "typescript": "^5.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.8.2"
+  }
+}
