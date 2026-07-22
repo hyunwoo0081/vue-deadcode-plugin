@@ -277,5 +277,100 @@ function getDeadIncomingChain(nodeId: string, graph: BiDirectionalGraph, visited
   return chain;
 }
 
+program
+  .command('prune')
+  .description('Prune dead files and unused static assets')
+  .option('-p, --project <path>', 'Path to project root', '.')
+  .option('--dry-run', 'Print files that would be pruned without actually pruning', false)
+  .option('--force', 'Delete files permanently without backup', false)
+  .option('--backup-dir <dir>', 'Specify the backup directory name', '.deadfinder-backup')
+  .action((options) => {
+    const projectPath = path.resolve(options.project);
+    if (!fs.existsSync(projectPath)) {
+      console.error(chalk.red(`Project path does not exist: ${options.project}`));
+      process.exit(1);
+    }
+
+    const analyzer = new DeadCodeAnalyzer({ projectPath });
+    const report = analyzer.analyze();
+
+    const deadFilesToPrune = report.files.filter(f => f.status === 'DEAD' && f.confidence === 'HIGH');
+    
+    const unusedAssetsToPrune: string[] = [];
+    report.files.forEach(f => {
+      if (f.unusedAssets) {
+        f.unusedAssets.forEach(asset => {
+          unusedAssetsToPrune.push(asset);
+        });
+      }
+    });
+
+    if (deadFilesToPrune.length === 0 && unusedAssetsToPrune.length === 0) {
+      console.log(chalk.green('\nNo dead files or unused static assets found to prune!'));
+      process.exit(0);
+    }
+
+    console.log(chalk.bold.yellow('\nPruning candidate files:'));
+    deadFilesToPrune.forEach(f => {
+      const rel = path.relative(projectPath, f.path);
+      console.log(`  📄 [File]   ${chalk.red(rel)}`);
+    });
+    unusedAssetsToPrune.forEach(asset => {
+      const rel = path.relative(projectPath, asset);
+      console.log(`  🖼️  [Asset]  ${chalk.red(rel)}`);
+    });
+
+    if (options.dryRun) {
+      console.log(chalk.cyan(`\n[Dry Run] Total ${deadFilesToPrune.length} files and ${unusedAssetsToPrune.length} assets would be pruned.`));
+      process.exit(0);
+    }
+
+    const isBackup = !options.force;
+    const backupDir = path.resolve(projectPath, options.backupDir);
+
+    if (isBackup) {
+      fs.mkdirSync(backupDir, { recursive: true });
+      console.log(chalk.cyan(`\nBacking up files to: ${chalk.bold(backupDir)}`));
+    }
+
+    let prunedFilesCount = 0;
+    let prunedAssetsCount = 0;
+
+    deadFilesToPrune.forEach(f => {
+      const absPath = path.resolve(f.path);
+      if (fs.existsSync(absPath)) {
+        if (isBackup) {
+          const relPath = path.relative(projectPath, absPath);
+          const backupDest = path.join(backupDir, relPath);
+          fs.mkdirSync(path.dirname(backupDest), { recursive: true });
+          fs.renameSync(absPath, backupDest);
+        } else {
+          fs.rmSync(absPath, { force: true });
+        }
+        prunedFilesCount++;
+      }
+    });
+
+    unusedAssetsToPrune.forEach(asset => {
+      const absPath = path.resolve(asset);
+      if (fs.existsSync(absPath)) {
+        if (isBackup) {
+          const relPath = path.relative(projectPath, absPath);
+          const backupDest = path.join(backupDir, relPath);
+          fs.mkdirSync(path.dirname(backupDest), { recursive: true });
+          fs.renameSync(absPath, backupDest);
+        } else {
+          fs.rmSync(absPath, { force: true });
+        }
+        prunedAssetsCount++;
+      }
+    });
+
+    console.log(chalk.bold.green(`\nSuccessfully pruned ${prunedFilesCount} files and ${prunedAssetsCount} static assets!`));
+    if (isBackup) {
+      console.log(chalk.green(`Pruned files are backed up at: ${backupDir}`));
+    }
+  });
+
 program.parse(process.argv);
 export { program };
