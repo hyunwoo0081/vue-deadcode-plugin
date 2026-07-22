@@ -32,5 +32,5 @@ jobs:
 
       - name: Run Vue DeadFinder CI Check
         run: |
-          # Fails the build if dead files exceed --max-dead-files (e.g. 2, matching test fixtures count)
-          node packages/cli/dist/index.js check --project . --max-dead-files 2
+          # Fails the build if dead files exceed --max-dead-files (e.g. 2, matching mock-project's intentional dead files)
+          node packages/cli/dist/index.js check --project tests/fixtures/mock-project --max-dead-files 2
