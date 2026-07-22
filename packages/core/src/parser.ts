@@ -11,6 +11,7 @@ export interface ParsedFile {
   hasDynamicComponents: boolean;
   declaredSlots?: string[];
   childUsages?: ChildComponentUsage[];
+  routeLinks?: string[];
 }
 
 export function parseFile(filePath: string): ParsedFile {
@@ -38,6 +39,7 @@ export function parseFile(filePath: string): ParsedFile {
     const templateTags: string[] = [];
     const declaredSlots: string[] = [];
     const childUsages: ChildComponentUsage[] = [];
+    const routeLinks: string[] = [];
     let hasDynamicComponents = false;
 
     if (descriptor.template) {
@@ -118,15 +120,33 @@ export function parseFile(filePath: string): ParsedFile {
                         filledSlots.push('default');
                       }
                     }
+
+                    // Extract v-bind:to / :to router link paths
+                    if (prop.name === 'bind' && prop.arg && prop.arg.type === 4 && prop.arg.content === 'to') {
+                      const exp = prop.exp?.content;
+                      if (exp) {
+                        const isStringLiteral = /^(['"`])(.*)\1$/.test(exp);
+                        if (isStringLiteral) {
+                          routeLinks.push(exp.slice(1, -1));
+                        }
+                      }
+                    }
                   } else if (prop.type === 6) { // Attributes
                     if (prop.name !== 'name' || tag !== 'slot') {
                       passedProps.push(prop.name);
+                    }
+                    // Extract to="..." router link paths
+                    if (prop.name === 'to') {
+                      const val = prop.value?.content;
+                      if (val) {
+                        routeLinks.push(val);
+                      }
                     }
                   }
                 }
               }
 
-              // Examine child elements for slot fills (e.g. <template v-slot:header>)
+              // Examine child elements for slot fills
               if (node.children && node.children.length > 0) {
                 let hasImplicitDefaultSlot = false;
                 for (const child of node.children) {
@@ -198,7 +218,8 @@ export function parseFile(filePath: string): ParsedFile {
       templateTags: Array.from(new Set(templateTags)),
       hasDynamicComponents,
       declaredSlots: Array.from(new Set(declaredSlots)),
-      childUsages
+      childUsages,
+      routeLinks: Array.from(new Set(routeLinks))
     };
   } else {
     const isTs = filePath.endsWith('.ts') || filePath.endsWith('.tsx');
@@ -210,7 +231,8 @@ export function parseFile(filePath: string): ParsedFile {
       templateTags: [],
       hasDynamicComponents: false,
       declaredSlots: [],
-      childUsages: []
+      childUsages: [],
+      routeLinks: []
     };
   }
 }

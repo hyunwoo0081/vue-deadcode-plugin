@@ -29,8 +29,8 @@ describe('Vue DeadFinder Core Engine', () => {
     const parsed = parseFile(mainTsPath);
     const indexed = indexSource(mainTsPath, parsed.scriptContent, parsed.templateTags);
 
-    expect(indexed.imports.length).toBe(2);
-    expect(indexed.imports[0].moduleSpecifier).toBe('./App.vue');
+    expect(indexed.imports.length).toBe(4);
+    expect(indexed.imports.some(imp => imp.moduleSpecifier === './App.vue')).toBe(true);
     expect(indexed.fileLevelReferences).toContain('App');
     expect(indexed.fileLevelReferences).toContain('unusedHelper');
   });
@@ -39,7 +39,7 @@ describe('Vue DeadFinder Core Engine', () => {
     const analyzer = new DeadCodeAnalyzer({ projectPath: mockProjectPath });
     const report = analyzer.analyze();
 
-    expect(report.summary.totalFiles).toBe(6);
+    expect(report.summary.totalFiles).toBe(8);
     expect(report.summary.deadFilesCount).toBe(2);
 
     const appReport = report.files.find(f => f.path.replace(/\\/g, '/').endsWith('src/App.vue'));
@@ -70,6 +70,30 @@ describe('Vue DeadFinder Core Engine', () => {
     expect(buttonReport?.unusedEmits).not.toContain('click');
     expect(buttonReport?.unusedSlots).toContain('icon');
     expect(buttonReport?.unusedSlots).not.toContain('default');
+
+    // Pinia verification
+    const storeReport = report.files.find(f => f.path.replace(/\\/g, '/').endsWith('src/store/counter.ts'));
+    expect(storeReport?.status).toBe('ALIVE');
+    const storeObj = storeReport?.unusedStoreMembers?.find(s => s.storeName === 'useCounterStore');
+    expect(storeObj?.members).toContain('unusedState');
+    expect(storeObj?.members).toContain('unusedGetter');
+    expect(storeObj?.members).toContain('unusedAction');
+    expect(storeObj?.members).toContain('count');
+    expect(storeObj?.members).not.toContain('increment');
+    expect(storeObj?.members).not.toContain('doubleCount');
+
+    // Router verification
+    const routerReport = report.files.find(f => f.path.replace(/\\/g, '/').endsWith('src/router/index.ts'));
+    expect(routerReport?.status).toBe('ALIVE');
+    expect(routerReport?.unusedRoutes).toContain('/unused-route');
+    expect(routerReport?.unusedRoutes).not.toContain('/about');
+
+    // Assets verification
+    const mainReport = report.files.find(f => f.path.replace(/\\/g, '/').endsWith('src/main.ts'));
+    const hasUnusedLogo = mainReport?.unusedAssets?.some(a => a.endsWith('logo.png'));
+    const hasUnusedImage = mainReport?.unusedAssets?.some(a => a.endsWith('unused-image.png'));
+    expect(hasUnusedLogo).toBe(false);
+    expect(hasUnusedImage).toBe(true);
   });
 
   it('should incrementally update when a file is saved', () => {

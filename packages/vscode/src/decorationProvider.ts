@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { DeadCodeReport } from '@deadfinder/core';
 
 export class DeadCodeDecorationProvider implements vscode.FileDecorationProvider {
@@ -52,7 +53,10 @@ export class DeadCodeDecorationProvider implements vscode.FileDecorationProvider
     const hasDeadExports = fileReport.symbols.some(s => s.status === 'DEAD');
     const hasUnusedInterfaces = (fileReport.unusedProps && fileReport.unusedProps.length > 0) ||
                                  (fileReport.unusedEmits && fileReport.unusedEmits.length > 0) ||
-                                 (fileReport.unusedSlots && fileReport.unusedSlots.length > 0);
+                                 (fileReport.unusedSlots && fileReport.unusedSlots.length > 0) ||
+                                 (fileReport.unusedStoreMembers && fileReport.unusedStoreMembers.length > 0) ||
+                                 (fileReport.unusedRoutes && fileReport.unusedRoutes.length > 0) ||
+                                 (fileReport.unusedAssets && fileReport.unusedAssets.length > 0);
 
     if (hasDeadExports || hasUnusedInterfaces) {
       const items: string[] = [];
@@ -68,6 +72,17 @@ export class DeadCodeDecorationProvider implements vscode.FileDecorationProvider
       }
       if (fileReport.unusedSlots && fileReport.unusedSlots.length > 0) {
         items.push(`Unused Slots: ${fileReport.unusedSlots.join(', ')}`);
+      }
+      if (fileReport.unusedStoreMembers && fileReport.unusedStoreMembers.length > 0) {
+        fileReport.unusedStoreMembers.forEach(s => {
+          items.push(`Unused Store Members (${s.storeName}): ${s.members.join(', ')}`);
+        });
+      }
+      if (fileReport.unusedRoutes && fileReport.unusedRoutes.length > 0) {
+        items.push(`Unused Routes: ${fileReport.unusedRoutes.join(', ')}`);
+      }
+      if (fileReport.unusedAssets && fileReport.unusedAssets.length > 0) {
+        items.push(`Unused Assets: ${fileReport.unusedAssets.map(a => path.basename(a)).join(', ')}`);
       }
 
       return {

@@ -1,5 +1,5 @@
 import ts from 'typescript';
-import { FileIndex, ImportInfo, ExportInfo, LocalReference, NodeType } from './types.js';
+import { FileIndex, ImportInfo, ExportInfo, LocalReference, NodeType, StoreDeclaration, StoreUsage } from './types.js';
 
 export function indexSource(filePath: string, scriptContent: string, templateTags: string[]): FileIndex {
   const sourceFile = ts.createSourceFile(filePath, scriptContent, ts.ScriptTarget.Latest, true);
@@ -319,6 +319,269 @@ export function indexSource(filePath: string, scriptContent: string, templateTag
     }
   }
 
+  const declaredStores: StoreDeclaration[] = [];
+  const storeUsages: StoreUsage[] = [];
+  const declaredRoutes: string[] = [];
+  const routeLinks: string[] = [];
+  const storeVars = new Map<string, { storeName: string }>();
+
+  function getStoreMembers(node: ts.CallExpression): string[] {
+    if (node.arguments.length < 2) return [];
+    const secondArg = node.arguments[1];
+    const members: string[] = [];
+
+    if (ts.isObjectLiteralExpression(secondArg)) {
+      for (const prop of secondArg.properties) {
+        if (ts.isPropertyAssignment(prop) && prop.name && ts.isIdentifier(prop.name)) {
+          const propName = prop.name.text;
+          if (propName === 'state') {
+            let stateObj: ts.ObjectLiteralExpression | null = null;
+            if (ts.isArrowFunction(prop.initializer) || ts.isFunctionExpression(prop.initializer)) {
+              stateObj = findReturnObjectLiteral(prop.initializer.body);
+            }
+            if (stateObj) {
+              for (const sProp of stateObj.properties) {
+                if (ts.isPropertyAssignment(sProp) && sProp.name && ts.isIdentifier(sProp.name)) {
+                  members.push(sProp.name.text);
+                }
+              }
+            }
+          } else if (propName === 'getters' || propName === 'actions') {
+            if (ts.isObjectLiteralExpression(prop.initializer)) {
+              for (const gProp of prop.initializer.properties) {
+                if (gProp.name && ts.isIdentifier(gProp.name)) {
+                  members.push(gProp.name.text);
+                }
+              }
+            }
+          }
+        } else if (ts.isMethodDeclaration(prop) && prop.name && ts.isIdentifier(prop.name) && prop.name.text === 'state') {
+          const stateObj = findReturnObjectLiteral(prop.body);
+          if (stateObj) {
+            for (const sProp of stateObj.properties) {
+              if (ts.isPropertyAssignment(sProp) && sProp.name && ts.isIdentifier(sProp.name)) {
+                members.push(sProp.name.text);
+              }
+            }
+          }
+        }
+      }
+    } else if (ts.isFunctionExpression(secondArg) || ts.isArrowFunction(secondArg)) {
+      const returnObj = findReturnObjectLiteral(secondArg.body);
+      if (returnObj) {
+        for (const prop of returnObj.properties) {
+          if (ts.isShorthandPropertyAssignment(prop)) {
+            members.push(prop.name.text);
+          } else if (ts.isPropertyAssignment(prop) && prop.name && ts.isIdentifier(prop.name)) {
+            members.push(prop.name.text);
+          }
+        }
+      }
+    }
+    return Array.from(new Set(members));
+  }
+
+  function findReturnObjectLiteral(node: ts.Node | undefined): ts.ObjectLiteralExpression | null {
+    if (!node) return null;
+    if (ts.isObjectLiteralExpression(node)) return node;
+    if (ts.isParenthesizedExpression(node)) return findReturnObjectLiteral(node.expression);
+    if (ts.isBlock(node)) {
+      for (const stmt of node.statements) {
+        if (ts.isReturnStatement(stmt) && stmt.expression) {
+          return findReturnObjectLiteral(stmt.expression);
+        }
+      }
+    }
+    let found: ts.ObjectLiteralExpression | null = null;
+    node.forEachChild(child => {
+      if (found) return;
+      if (ts.isReturnStatement(child) && child.expression) {
+        found = findReturnObjectLiteral(child.expression);
+      } else {
+        found = findReturnObjectLiteral(child);
+      }
+    });
+    return found;
+  }
+
+  function extractRoutePaths(node: ts.Node): string[] {
+    const paths: string[] = [];
+    if (ts.isObjectLiteralExpression(node)) {
+      let pathVal = '';
+      let childrenNode: ts.Node | null = null;
+      for (const prop of node.properties) {
+        if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name)) {
+          if (prop.name.text === 'path' && ts.isStringLiteral(prop.initializer)) {
+            pathVal = prop.initializer.text;
+          } else if (prop.name.text === 'children') {
+            childrenNode = prop.initializer;
+          }
+        }
+      }
+      if (pathVal) {
+        paths.push(pathVal);
+        if (childrenNode) {
+          let childPaths: string[] = [];
+          if (ts.isArrayLiteralExpression(childrenNode)) {
+            for (const el of childrenNode.elements) {
+              childPaths.push(...extractRoutePaths(el));
+            }
+          }
+          for (const cp of childPaths) {
+            const combined = pathVal.endsWith('/') ? pathVal + cp.replace(/^\//, '') : pathVal + '/' + cp.replace(/^\//, '');
+            paths.push(combined);
+          }
+        }
+      }
+    } else if (ts.isArrayLiteralExpression(node)) {
+      for (const el of node.elements) {
+        paths.push(...extractRoutePaths(el));
+      }
+    }
+    return paths;
+  }
+
+  function walkASTForPhase3(node: ts.Node) {
+    // 1. Find defineStore
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'defineStore') {
+      let storeVarName = '';
+      if (node.parent && ts.isVariableDeclaration(node.parent) && ts.isIdentifier(node.parent.name)) {
+        storeVarName = node.parent.name.text;
+      }
+      if (storeVarName) {
+        const members = getStoreMembers(node);
+        declaredStores.push({ name: storeVarName, members });
+      }
+    }
+
+    // 2. Find createRouter routes
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'createRouter') {
+      if (node.arguments.length > 0 && ts.isObjectLiteralExpression(node.arguments[0])) {
+        const optionsObj = node.arguments[0];
+        for (const prop of optionsObj.properties) {
+          if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === 'routes') {
+            declaredRoutes.push(...extractRoutePaths(prop.initializer));
+          }
+        }
+      }
+    }
+
+    // 3. Track store calls and variable definitions
+    if (ts.isVariableDeclaration(node) && node.initializer && ts.isCallExpression(node.initializer)) {
+      let storeName = '';
+      if (ts.isIdentifier(node.initializer.expression)) {
+        const called = node.initializer.expression.text;
+        if (called.startsWith('use') && called.endsWith('Store')) {
+          storeName = called;
+        }
+      }
+      if (storeName) {
+        if (ts.isIdentifier(node.name)) {
+          storeVars.set(node.name.text, { storeName });
+        } else if (ts.isObjectBindingPattern(node.name)) {
+          const accessed: string[] = [];
+          for (const el of node.name.elements) {
+            if (ts.isBindingElement(el)) {
+              const propName = el.propertyName;
+              if (propName && ts.isIdentifier(propName)) {
+                accessed.push(propName.text);
+              } else if (ts.isIdentifier(el.name)) {
+                accessed.push(el.name.text);
+              }
+            }
+          }
+          storeUsages.push({ storeName, accessedMembers: accessed, hasDynamicAccess: false });
+        }
+      } else if (ts.isIdentifier(node.initializer.expression) && node.initializer.expression.text === 'storeToRefs') {
+        if (node.initializer.arguments.length > 0 && ts.isIdentifier(node.initializer.arguments[0])) {
+          const storeVar = node.initializer.arguments[0].text;
+          const storeInfo = storeVars.get(storeVar);
+          if (storeInfo) {
+            if (ts.isObjectBindingPattern(node.name)) {
+              const accessed: string[] = [];
+              for (const el of node.name.elements) {
+                if (ts.isBindingElement(el)) {
+                  const propName = el.propertyName;
+                  if (propName && ts.isIdentifier(propName)) {
+                    accessed.push(propName.text);
+                  } else if (ts.isIdentifier(el.name)) {
+                    accessed.push(el.name.text);
+                  }
+                }
+              }
+              storeUsages.push({ storeName: storeInfo.storeName, accessedMembers: accessed, hasDynamicAccess: false });
+            } else if (ts.isIdentifier(node.name)) {
+              storeVars.set(node.name.text, { storeName: storeInfo.storeName });
+            }
+          }
+        }
+      }
+    }
+
+    // 4. Track property accesses on store variables
+    if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
+      const varName = node.expression.text;
+      const storeInfo = storeVars.get(varName);
+      if (storeInfo) {
+        const member = node.name.text;
+        let existing = storeUsages.find(u => u.storeName === storeInfo.storeName);
+        if (!existing) {
+          existing = { storeName: storeInfo.storeName, accessedMembers: [], hasDynamicAccess: false };
+          storeUsages.push(existing);
+        }
+        existing.accessedMembers.push(member);
+      }
+    }
+
+    // 5. Track element accesses on store variables
+    if (ts.isElementAccessExpression(node) && ts.isIdentifier(node.expression)) {
+      const varName = node.expression.text;
+      const storeInfo = storeVars.get(varName);
+      if (storeInfo) {
+        let existing = storeUsages.find(u => u.storeName === storeInfo.storeName);
+        if (!existing) {
+          existing = { storeName: storeInfo.storeName, accessedMembers: [], hasDynamicAccess: false };
+          storeUsages.push(existing);
+        }
+        if (ts.isStringLiteral(node.argumentExpression)) {
+          existing.accessedMembers.push(node.argumentExpression.text);
+        } else {
+          existing.hasDynamicAccess = true;
+        }
+      }
+    }
+
+    // 6. Track router.push('/path')
+    if (ts.isCallExpression(node) && node.arguments.length > 0) {
+      let isRouterPush = false;
+      if (ts.isPropertyAccessExpression(node.expression)) {
+        const expr = node.expression.expression;
+        const prop = node.expression.name.text;
+        if (ts.isIdentifier(expr) && (expr.text === 'router' || expr.text === '$router')) {
+          if (prop === 'push' || prop === 'replace' || prop === 'resolve') {
+            isRouterPush = true;
+          }
+        }
+      }
+      if (isRouterPush) {
+        const firstArg = node.arguments[0];
+        if (ts.isStringLiteral(firstArg)) {
+          routeLinks.push(firstArg.text);
+        } else if (ts.isObjectLiteralExpression(firstArg)) {
+          for (const prop of firstArg.properties) {
+            if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === 'path' && ts.isStringLiteral(prop.initializer)) {
+              routeLinks.push(prop.initializer.text);
+            }
+          }
+        }
+      }
+    }
+
+    ts.forEachChild(node, walkASTForPhase3);
+  }
+
+  walkASTForPhase3(sourceFile);
+
   return {
     filePath,
     imports,
@@ -326,7 +589,11 @@ export function indexSource(filePath: string, scriptContent: string, templateTag
     localReferences,
     fileLevelReferences,
     declaredProps: filePath.endsWith('.vue') ? Array.from(new Set(declaredProps)) : undefined,
-    declaredEmits: filePath.endsWith('.vue') ? Array.from(new Set(declaredEmits)) : undefined
+    declaredEmits: filePath.endsWith('.vue') ? Array.from(new Set(declaredEmits)) : undefined,
+    declaredStores: declaredStores.length > 0 ? declaredStores : undefined,
+    storeUsages: storeUsages.length > 0 ? storeUsages : undefined,
+    declaredRoutes: declaredRoutes.length > 0 ? declaredRoutes : undefined,
+    routeLinks: routeLinks.length > 0 ? routeLinks : undefined
   };
 }
 

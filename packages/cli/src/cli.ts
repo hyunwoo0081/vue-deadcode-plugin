@@ -84,6 +84,42 @@ program
           }
         });
       }
+
+      // Unused Pinia Store Members
+      const filesWithUnusedStores = report.files.filter(f => f.unusedStoreMembers);
+      if (filesWithUnusedStores.length > 0) {
+        console.log(chalk.bold.green('\nUnused Pinia Store Members:'));
+        filesWithUnusedStores.forEach(f => {
+          const relPath = path.relative(projectPath, f.path);
+          console.log(`  🍍 ${chalk.bold.gray(relPath)}:`);
+          f.unusedStoreMembers?.forEach(store => {
+            console.log(`    ${chalk.green(store.storeName + ':')}  ${store.members.join(', ')}`);
+          });
+        });
+      }
+
+      // Unused Routes
+      const filesWithUnusedRoutes = report.files.filter(f => f.unusedRoutes);
+      if (filesWithUnusedRoutes.length > 0) {
+        console.log(chalk.bold.magenta('\nUnused Routes:'));
+        filesWithUnusedRoutes.forEach(f => {
+          const relPath = path.relative(projectPath, f.path);
+          console.log(`  🛣️  ${chalk.bold.gray(relPath)}:`);
+          console.log(`    ${chalk.magenta('Paths:')}  ${f.unusedRoutes?.join(', ')}`);
+        });
+      }
+
+      // Unused Assets
+      const entryReports = report.files.filter(f => f.unusedAssets);
+      if (entryReports.length > 0) {
+        console.log(chalk.bold.yellow('\nUnused Static Assets (Images/Media):'));
+        entryReports.forEach(f => {
+          f.unusedAssets?.forEach(asset => {
+            const relAsset = path.relative(projectPath, asset);
+            console.log(`  🖼️  ${chalk.yellow(relAsset)}`);
+          });
+        });
+      }
     }
   });
 

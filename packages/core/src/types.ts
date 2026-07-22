@@ -49,6 +49,9 @@ export interface FileAnalysisReport {
   unusedProps?: string[];
   unusedEmits?: string[];
   unusedSlots?: string[];
+  unusedStoreMembers?: { storeName: string; members: string[] }[];
+  unusedRoutes?: string[];
+  unusedAssets?: string[];
 }
 
 export interface SymbolAnalysisReport {
@@ -92,6 +95,17 @@ export interface ChildComponentUsage {
   hasDynamicEvents: boolean; // v-on="obj"
 }
 
+export interface StoreDeclaration {
+  name: string; // e.g. "useCounterStore"
+  members: string[]; // e.g. ["count", "increment"]
+}
+
+export interface StoreUsage {
+  storeName: string; // e.g. "useCounterStore"
+  accessedMembers: string[]; // e.g. ["count"]
+  hasDynamicAccess: boolean;
+}
+
 export interface FileIndex {
   filePath: string;
   imports: ImportInfo[];
@@ -103,5 +117,10 @@ export interface FileIndex {
   declaredEmits?: string[];
   declaredSlots?: string[];
   childUsages?: ChildComponentUsage[];
+  // Phase 3 Part 2 additions
+  declaredStores?: StoreDeclaration[];
+  storeUsages?: StoreUsage[];
+  declaredRoutes?: string[];
+  routeLinks?: string[];
 }
 

@@ -61,6 +61,10 @@ export class DeadCodeAnalyzer {
         const indexed = indexSource(filePath, parsed.scriptContent, parsed.templateTags);
         indexed.declaredSlots = parsed.declaredSlots;
         indexed.childUsages = parsed.childUsages;
+        indexed.routeLinks = Array.from(new Set([
+          ...(indexed.routeLinks || []),
+          ...(parsed.routeLinks || [])
+        ]));
         this.fileIndexes.set(filePath, indexed);
       } catch (err) {
         // Failed to parse/index file, skip or log
@@ -83,6 +87,10 @@ export class DeadCodeAnalyzer {
         const indexed = indexSource(normalizedPath, parsed.scriptContent, parsed.templateTags);
         indexed.declaredSlots = parsed.declaredSlots;
         indexed.childUsages = parsed.childUsages;
+        indexed.routeLinks = Array.from(new Set([
+          ...(indexed.routeLinks || []),
+          ...(parsed.routeLinks || [])
+        ]));
         this.fileIndexes.set(normalizedPath, indexed);
 
         if (!this.allFiles.includes(normalizedPath)) {
@@ -325,6 +333,56 @@ export class DeadCodeAnalyzer {
       }
     }
 
+    // Phase 3 Part 2: Gather all route links and declared routes project-wide
+    const allRouteLinks = new Set<string>();
+    const allDeclaredRoutes = new Set<string>();
+
+    for (const filePath of this.allFiles) {
+      const fileIndex = this.fileIndexes.get(filePath);
+      if (fileIndex) {
+        if (fileIndex.routeLinks) {
+          for (const rl of fileIndex.routeLinks) {
+            allRouteLinks.add(rl);
+          }
+        }
+        if (fileIndex.declaredRoutes) {
+          for (const dr of fileIndex.declaredRoutes) {
+            allDeclaredRoutes.add(dr);
+          }
+        }
+      }
+    }
+
+    // Phase 3 Part 2: Glob and analyze project-wide unused assets
+    const assetPatterns = ['src/assets/**/*', 'assets/**/*'];
+    const allAssets = fg.sync(assetPatterns, {
+      cwd: this.projectPath,
+      absolute: true
+    }).filter(f => fs.statSync(f).isFile()).map(f => f.replace(/\\/g, '/'));
+
+    const unusedAssetsList: string[] = [];
+    for (const assetPath of allAssets) {
+      const assetName = path.basename(assetPath);
+      let isUsed = false;
+
+      for (const srcPath of this.allFiles) {
+        const srcNodeId = `file:///${srcPath}`;
+        if (!aliveNodeIds.has(srcNodeId)) continue; // skip dead files
+
+        try {
+          const content = fs.readFileSync(srcPath, 'utf-8');
+          if (content.includes(assetName)) {
+            isUsed = true;
+            break;
+          }
+        } catch (_) {}
+      }
+
+      if (!isUsed) {
+        unusedAssetsList.push(assetPath);
+      }
+    }
+
     const fileReports: FileAnalysisReport[] = [];
     let deadFilesCount = 0;
     let deadSymbolsCount = 0;
@@ -411,7 +469,6 @@ export class DeadCodeAnalyzer {
         let bypassPropsAnalysis = false;
         let bypassEmitsAnalysis = false;
 
-        // Traverse all other files to find usages of this child component
         for (const parentPath of this.allFiles) {
           const parentIndex = this.fileIndexes.get(parentPath);
           if (parentIndex && parentIndex.childUsages) {
@@ -461,6 +518,68 @@ export class DeadCodeAnalyzer {
         unusedSlots = unusedSlotsList.length > 0 ? unusedSlotsList : undefined;
       }
 
+      // Phase 3 Part 2: Unused Store Members
+      let unusedStoreMembers: { storeName: string; members: string[] }[] | undefined = undefined;
+      if (status === 'ALIVE' && fileIndex && fileIndex.declaredStores) {
+        const unusedStoreList: { storeName: string; members: string[] }[] = [];
+
+        for (const store of fileIndex.declaredStores) {
+          const usedStoreMembers = new Set<string>();
+          let bypassStoreAnalysis = false;
+
+          for (const otherPath of this.allFiles) {
+            const otherIndex = this.fileIndexes.get(otherPath);
+            if (otherIndex && otherIndex.storeUsages) {
+              for (const usage of otherIndex.storeUsages) {
+                if (usage.storeName === store.name) {
+                  if (usage.hasDynamicAccess) {
+                    bypassStoreAnalysis = true;
+                  }
+                  for (const m of usage.accessedMembers) {
+                    usedStoreMembers.add(m);
+                  }
+                }
+              }
+            }
+          }
+
+          const storeUnused: string[] = [];
+          if (!bypassStoreAnalysis) {
+            for (const member of store.members) {
+              if (!usedStoreMembers.has(member)) {
+                storeUnused.push(member);
+              }
+            }
+          }
+
+          if (storeUnused.length > 0) {
+            unusedStoreList.push({ storeName: store.name, members: storeUnused });
+          }
+        }
+
+        if (unusedStoreList.length > 0) {
+          unusedStoreMembers = unusedStoreList;
+        }
+      }
+
+      // Phase 3 Part 2: Unused Routes
+      let unusedRoutes: string[] | undefined = undefined;
+      if (status === 'ALIVE' && fileIndex && fileIndex.declaredRoutes) {
+        const unusedRoutesList: string[] = [];
+        for (const r of fileIndex.declaredRoutes) {
+          if (r !== '/' && !allRouteLinks.has(r)) {
+            unusedRoutesList.push(r);
+          }
+        }
+        if (unusedRoutesList.length > 0) {
+          unusedRoutes = unusedRoutesList;
+        }
+      }
+
+      // Phase 3 Part 2: Unused Assets (report on entry files only)
+      const isEntryFile = this.entries.includes(filePath);
+      const unusedAssets = (isEntryFile && unusedAssetsList.length > 0) ? unusedAssetsList : undefined;
+
       fileReports.push({
         path: filePath,
         status,
@@ -470,7 +589,10 @@ export class DeadCodeAnalyzer {
         symbols: symbolsReport,
         unusedProps,
         unusedEmits,
-        unusedSlots
+        unusedSlots,
+        unusedStoreMembers,
+        unusedRoutes,
+        unusedAssets
       });
     }
 
