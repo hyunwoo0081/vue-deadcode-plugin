@@ -63,6 +63,27 @@ program
           console.log(`  ✗ ${chalk.gray(relPath)}:${s.line} - export '${chalk.yellow(s.name)}' (${chalk.yellow(s.confidence)} confidence)`);
         });
       }
+
+      // Unused Vue interfaces (Props / Emits / Slots)
+      const filesWithUnusedInterfaces = report.files.filter(
+        f => f.unusedProps || f.unusedEmits || f.unusedSlots
+      );
+      if (filesWithUnusedInterfaces.length > 0) {
+        console.log(chalk.bold.cyan('\nUnused Vue Interfaces (Props / Emits / Slots):'));
+        filesWithUnusedInterfaces.forEach(f => {
+          const relPath = path.relative(projectPath, f.path);
+          console.log(`  🏢 ${chalk.bold.gray(relPath)}:`);
+          if (f.unusedProps && f.unusedProps.length > 0) {
+            console.log(`    ${chalk.blue('Props:')}  ${f.unusedProps.join(', ')}`);
+          }
+          if (f.unusedEmits && f.unusedEmits.length > 0) {
+            console.log(`    ${chalk.magenta('Emits:')}  ${f.unusedEmits.join(', ')}`);
+          }
+          if (f.unusedSlots && f.unusedSlots.length > 0) {
+            console.log(`    ${chalk.yellow('Slots:')}  ${f.unusedSlots.join(', ')}`);
+          }
+        });
+      }
     }
   });
 

@@ -45,6 +45,10 @@ export interface FileAnalysisReport {
   tracePath?: string[]; // Path from entry to this node (if alive)
   reasons?: string[];   // Reason why it's considered dead
   symbols: SymbolAnalysisReport[];
+  // Phase 3 additions:
+  unusedProps?: string[];
+  unusedEmits?: string[];
+  unusedSlots?: string[];
 }
 
 export interface SymbolAnalysisReport {
@@ -79,11 +83,25 @@ export interface LocalReference {
   toSymbol: string;
 }
 
+export interface ChildComponentUsage {
+  componentName: string; // e.g. "MyButton"
+  passedProps: string[]; // e.g. ["size", "disabled"]
+  subscribedEvents: string[]; // e.g. ["click"]
+  filledSlots: string[]; // e.g. ["default", "header"]
+  hasDynamicProps: boolean; // v-bind="obj"
+  hasDynamicEvents: boolean; // v-on="obj"
+}
+
 export interface FileIndex {
   filePath: string;
   imports: ImportInfo[];
   exports: ExportInfo[];
   localReferences: LocalReference[];
   fileLevelReferences: string[];
+  // Phase 3 component interface declarations
+  declaredProps?: string[];
+  declaredEmits?: string[];
+  declaredSlots?: string[];
+  childUsages?: ChildComponentUsage[];
 }
 

@@ -48,13 +48,34 @@ export class DeadCodeDecorationProvider implements vscode.FileDecorationProvider
       };
     }
 
-    // Check if the file is ALIVE but has dead symbols (unused exports)
+    // Check if the file is ALIVE but has dead symbols (unused exports) or unused props/emits/slots
     const hasDeadExports = fileReport.symbols.some(s => s.status === 'DEAD');
-    if (hasDeadExports) {
+    const hasUnusedInterfaces = (fileReport.unusedProps && fileReport.unusedProps.length > 0) ||
+                                 (fileReport.unusedEmits && fileReport.unusedEmits.length > 0) ||
+                                 (fileReport.unusedSlots && fileReport.unusedSlots.length > 0);
+
+    if (hasDeadExports || hasUnusedInterfaces) {
+      const items: string[] = [];
+      if (hasDeadExports) {
+        const deadSyms = fileReport.symbols.filter(s => s.status === 'DEAD').map(s => s.name);
+        items.push(`Unused Exports: ${deadSyms.join(', ')}`);
+      }
+      if (fileReport.unusedProps && fileReport.unusedProps.length > 0) {
+        items.push(`Unused Props: ${fileReport.unusedProps.join(', ')}`);
+      }
+      if (fileReport.unusedEmits && fileReport.unusedEmits.length > 0) {
+        items.push(`Unused Emits: ${fileReport.unusedEmits.join(', ')}`);
+      }
+      if (fileReport.unusedSlots && fileReport.unusedSlots.length > 0) {
+        items.push(`Unused Slots: ${fileReport.unusedSlots.join(', ')}`);
+      }
+
       return {
-        badge: 'U',
-        tooltip: 'Vue DeadFinder: File contains unused exports',
-        color: new vscode.ThemeColor('gitDecoration.untrackedResourceForeground'),
+        badge: hasUnusedInterfaces ? 'I' : 'U', // 'I' for unused interfaces, 'U' for unused exports
+        tooltip: `Vue DeadFinder Warnings:\n- ${items.join('\n- ')}`,
+        color: hasUnusedInterfaces
+          ? new vscode.ThemeColor('gitDecoration.modifiedResourceForeground')
+          : new vscode.ThemeColor('gitDecoration.untrackedResourceForeground'),
         propagate: false
       };
     }

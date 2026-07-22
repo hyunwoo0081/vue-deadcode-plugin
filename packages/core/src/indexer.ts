@@ -226,6 +226,89 @@ export function indexSource(filePath: string, scriptContent: string, templateTag
     }
   }
 
+  const declaredProps: string[] = [];
+  const declaredEmits: string[] = [];
+
+  function findPropsAndEmits(node: ts.Node) {
+    if (ts.isCallExpression(node)) {
+      if (ts.isIdentifier(node.expression)) {
+        const name = node.expression.text;
+        if (name === 'defineProps') {
+          // 1. Analyze type arguments: defineProps<{ msg: string }>()
+          if (node.typeArguments && node.typeArguments.length > 0) {
+            const typeArg = node.typeArguments[0];
+            if (ts.isTypeLiteralNode(typeArg)) {
+              for (const member of typeArg.members) {
+                if (ts.isPropertySignature(member) && ts.isIdentifier(member.name)) {
+                  declaredProps.push(member.name.text);
+                }
+              }
+            } else if (ts.isTypeReferenceNode(typeArg)) {
+              const typeName = ts.isIdentifier(typeArg.typeName) ? typeArg.typeName.text : '';
+              if (typeName) {
+                const resolvedProps = resolvePropsFromTypeName(sourceFile, typeName);
+                declaredProps.push(...resolvedProps);
+              }
+            }
+          }
+          // 2. Analyze arguments: defineProps({ msg: String })
+          if (node.arguments && node.arguments.length > 0) {
+            const firstArg = node.arguments[0];
+            if (ts.isObjectLiteralExpression(firstArg)) {
+              for (const prop of firstArg.properties) {
+                if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name)) {
+                  declaredProps.push(prop.name.text);
+                }
+              }
+            }
+          }
+        } else if (name === 'defineEmits') {
+          // 1. Analyze type arguments: defineEmits<{ (e: 'change'): void }>()
+          if (node.typeArguments && node.typeArguments.length > 0) {
+            const typeArg = node.typeArguments[0];
+            if (ts.isTypeLiteralNode(typeArg)) {
+              for (const member of typeArg.members) {
+                if (ts.isCallSignatureDeclaration(member)) {
+                  if (member.parameters && member.parameters.length > 0) {
+                    const firstParam = member.parameters[0];
+                    if (firstParam.type && ts.isLiteralTypeNode(firstParam.type)) {
+                      if (ts.isStringLiteral(firstParam.type.literal)) {
+                        declaredEmits.push(firstParam.type.literal.text);
+                      }
+                    }
+                  }
+                } else if (ts.isPropertySignature(member) && ts.isIdentifier(member.name)) {
+                  declaredEmits.push(member.name.text);
+                }
+              }
+            } else if (ts.isTypeReferenceNode(typeArg)) {
+              const typeName = ts.isIdentifier(typeArg.typeName) ? typeArg.typeName.text : '';
+              if (typeName) {
+                const resolvedEmits = resolveEmitsFromTypeName(sourceFile, typeName);
+                declaredEmits.push(...resolvedEmits);
+              }
+            }
+          }
+          // 2. Analyze arguments: defineEmits(['change'])
+          if (node.arguments && node.arguments.length > 0) {
+            const firstArg = node.arguments[0];
+            if (ts.isArrayLiteralExpression(firstArg)) {
+              for (const el of firstArg.elements) {
+                if (ts.isStringLiteral(el)) {
+                  declaredEmits.push(el.text);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, findPropsAndEmits);
+  }
+
+  // Traverse the AST to find defineProps and defineEmits
+  findPropsAndEmits(sourceFile);
+
   if (filePath.endsWith('.vue')) {
     if (!exports.some(e => e.name === 'default')) {
       exports.push({
@@ -241,8 +324,72 @@ export function indexSource(filePath: string, scriptContent: string, templateTag
     imports,
     exports,
     localReferences,
-    fileLevelReferences
+    fileLevelReferences,
+    declaredProps: filePath.endsWith('.vue') ? Array.from(new Set(declaredProps)) : undefined,
+    declaredEmits: filePath.endsWith('.vue') ? Array.from(new Set(declaredEmits)) : undefined
   };
+}
+
+function resolvePropsFromTypeName(sourceFile: ts.SourceFile, typeName: string): string[] {
+  const props: string[] = [];
+  for (const statement of sourceFile.statements) {
+    if (ts.isInterfaceDeclaration(statement) && statement.name.text === typeName) {
+      for (const member of statement.members) {
+        if (ts.isPropertySignature(member) && ts.isIdentifier(member.name)) {
+          props.push(member.name.text);
+        }
+      }
+    } else if (ts.isTypeAliasDeclaration(statement) && statement.name.text === typeName) {
+      if (ts.isTypeLiteralNode(statement.type)) {
+        for (const member of statement.type.members) {
+          if (ts.isPropertySignature(member) && ts.isIdentifier(member.name)) {
+            props.push(member.name.text);
+          }
+        }
+      }
+    }
+  }
+  return props;
+}
+
+function resolveEmitsFromTypeName(sourceFile: ts.SourceFile, typeName: string): string[] {
+  const emits: string[] = [];
+  for (const statement of sourceFile.statements) {
+    if (ts.isInterfaceDeclaration(statement) && statement.name.text === typeName) {
+      for (const member of statement.members) {
+        if (ts.isCallSignatureDeclaration(member)) {
+          if (member.parameters && member.parameters.length > 0) {
+            const firstParam = member.parameters[0];
+            if (firstParam.type && ts.isLiteralTypeNode(firstParam.type)) {
+              if (ts.isStringLiteral(firstParam.type.literal)) {
+                emits.push(firstParam.type.literal.text);
+              }
+            }
+          }
+        } else if (ts.isPropertySignature(member) && ts.isIdentifier(member.name)) {
+          emits.push(member.name.text);
+        }
+      }
+    } else if (ts.isTypeAliasDeclaration(statement) && statement.name.text === typeName) {
+      if (ts.isTypeLiteralNode(statement.type)) {
+        for (const member of statement.type.members) {
+          if (ts.isCallSignatureDeclaration(member)) {
+            if (member.parameters && member.parameters.length > 0) {
+              const firstParam = member.parameters[0];
+              if (firstParam.type && ts.isLiteralTypeNode(firstParam.type)) {
+                if (ts.isStringLiteral(firstParam.type.literal)) {
+                  emits.push(firstParam.type.literal.text);
+                }
+              }
+            }
+          } else if (ts.isPropertySignature(member) && ts.isIdentifier(member.name)) {
+            emits.push(member.name.text);
+          }
+        }
+      }
+    }
+  }
+  return emits;
 }
 
 function collectNamesFromBinding(nameNode: ts.BindingName): string[] {

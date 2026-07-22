@@ -59,6 +59,8 @@ export class DeadCodeAnalyzer {
         this.parsedFiles.set(filePath, parsed);
 
         const indexed = indexSource(filePath, parsed.scriptContent, parsed.templateTags);
+        indexed.declaredSlots = parsed.declaredSlots;
+        indexed.childUsages = parsed.childUsages;
         this.fileIndexes.set(filePath, indexed);
       } catch (err) {
         // Failed to parse/index file, skip or log
@@ -79,6 +81,8 @@ export class DeadCodeAnalyzer {
         this.parsedFiles.set(normalizedPath, parsed);
 
         const indexed = indexSource(normalizedPath, parsed.scriptContent, parsed.templateTags);
+        indexed.declaredSlots = parsed.declaredSlots;
+        indexed.childUsages = parsed.childUsages;
         this.fileIndexes.set(normalizedPath, indexed);
 
         if (!this.allFiles.includes(normalizedPath)) {
@@ -392,13 +396,81 @@ export class DeadCodeAnalyzer {
         }
       }
 
+      let unusedProps: string[] | undefined = undefined;
+      let unusedEmits: string[] | undefined = undefined;
+      let unusedSlots: string[] | undefined = undefined;
+
+      if (status === 'ALIVE' && filePath.endsWith('.vue') && fileIndex) {
+        const declaredProps = fileIndex.declaredProps || [];
+        const declaredEmits = fileIndex.declaredEmits || [];
+        const declaredSlots = fileIndex.declaredSlots || [];
+
+        const usedProps = new Set<string>();
+        const usedEmits = new Set<string>();
+        const usedSlots = new Set<string>();
+        let bypassPropsAnalysis = false;
+        let bypassEmitsAnalysis = false;
+
+        // Traverse all other files to find usages of this child component
+        for (const parentPath of this.allFiles) {
+          const parentIndex = this.fileIndexes.get(parentPath);
+          if (parentIndex && parentIndex.childUsages) {
+            for (const usage of parentIndex.childUsages) {
+              if (this.isUsageOfComponent(usage, parentPath, filePath, parentIndex)) {
+                if (usage.hasDynamicProps) bypassPropsAnalysis = true;
+                if (usage.hasDynamicEvents) bypassEmitsAnalysis = true;
+                for (const p of usage.passedProps) usedProps.add(p);
+                for (const e of usage.subscribedEvents) usedEmits.add(e);
+                for (const s of usage.filledSlots) usedSlots.add(s);
+              }
+            }
+          }
+        }
+
+        const norm = (s: string) => s.replace(/[-_]/g, '').toLowerCase();
+        const usedPropsNormalized = new Set(Array.from(usedProps).map(norm));
+        const usedEmitsNormalized = new Set(Array.from(usedEmits).map(norm));
+
+        const unusedPropsList: string[] = [];
+        if (!bypassPropsAnalysis) {
+          for (const dp of declaredProps) {
+            if (!usedPropsNormalized.has(norm(dp))) {
+              unusedPropsList.push(dp);
+            }
+          }
+        }
+
+        const unusedEmitsList: string[] = [];
+        if (!bypassEmitsAnalysis) {
+          for (const de of declaredEmits) {
+            if (!usedEmitsNormalized.has(norm(de))) {
+              unusedEmitsList.push(de);
+            }
+          }
+        }
+
+        const unusedSlotsList: string[] = [];
+        for (const ds of declaredSlots) {
+          if (!usedSlots.has(ds)) {
+            unusedSlotsList.push(ds);
+          }
+        }
+
+        unusedProps = unusedPropsList.length > 0 ? unusedPropsList : undefined;
+        unusedEmits = unusedEmitsList.length > 0 ? unusedEmitsList : undefined;
+        unusedSlots = unusedSlotsList.length > 0 ? unusedSlotsList : undefined;
+      }
+
       fileReports.push({
         path: filePath,
         status,
         confidence: fileConfidence,
         tracePath,
         reasons: status === 'DEAD' ? reasons : undefined,
-        symbols: symbolsReport
+        symbols: symbolsReport,
+        unusedProps,
+        unusedEmits,
+        unusedSlots
       });
     }
 
@@ -412,6 +484,34 @@ export class DeadCodeAnalyzer {
       },
       files: fileReports
     };
+  }
+
+  private isUsageOfComponent(usage: any, parentPath: string, childPath: string, parentIndex: any): boolean {
+    const childBaseName = path.basename(childPath, '.vue'); // e.g. "MyButton"
+    const possibleNames = new Set<string>([childBaseName, childBaseName.toLowerCase()]);
+    
+    const kebabBase = childBaseName.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+    possibleNames.add(kebabBase);
+
+    if (parentIndex && parentIndex.imports) {
+      for (const imp of parentIndex.imports) {
+        const resolvedTarget = this.resolveModulePath(parentPath, imp.moduleSpecifier);
+        if (resolvedTarget === childPath) {
+          for (const sym of imp.importedSymbols) {
+            possibleNames.add(sym.localName);
+            possibleNames.add(sym.localName.toLowerCase());
+            const kebabLocal = sym.localName.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+            possibleNames.add(kebabLocal);
+          }
+        }
+      }
+    }
+
+    const tag = usage.componentName;
+    const tagLower = tag.toLowerCase();
+    const tagKebab = tag.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+
+    return possibleNames.has(tag) || possibleNames.has(tagLower) || possibleNames.has(tagKebab);
   }
 
   private computePathConfidence(pathNodes: string[], graph: BiDirectionalGraph): Confidence {

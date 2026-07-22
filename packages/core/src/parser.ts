@@ -1,5 +1,6 @@
 import fs from 'fs';
 import { parse as parseVue, compileTemplate } from '@vue/compiler-sfc';
+import { ChildComponentUsage } from './types.js';
 
 export interface ParsedFile {
   filePath: string;
@@ -8,6 +9,8 @@ export interface ParsedFile {
   scriptLang: 'ts' | 'js';
   templateTags: string[];
   hasDynamicComponents: boolean;
+  declaredSlots?: string[];
+  childUsages?: ChildComponentUsage[];
 }
 
 export function parseFile(filePath: string): ParsedFile {
@@ -33,6 +36,8 @@ export function parseFile(filePath: string): ParsedFile {
     }
 
     const templateTags: string[] = [];
+    const declaredSlots: string[] = [];
+    const childUsages: ChildComponentUsage[] = [];
     let hasDynamicComponents = false;
 
     if (descriptor.template) {
@@ -47,6 +52,7 @@ export function parseFile(filePath: string): ParsedFile {
           walkTemplate(ast, (node) => {
             if (node.type === 1) { // Element Node
               const tag = node.tag;
+              
               if (tag === 'component') {
                 const isProp = getIsPropValue(node);
                 if (isProp) {
@@ -62,7 +68,109 @@ export function parseFile(filePath: string): ParsedFile {
                 templateTags.push(tag);
               }
 
-              // Extract identifiers from attributes and directives
+              // Extract slot declarations
+              if (tag === 'slot') {
+                let slotName = 'default';
+                if (node.props) {
+                  for (const prop of node.props) {
+                    if (prop.type === 6 && prop.name === 'name') {
+                      slotName = prop.value?.content || 'default';
+                    } else if (prop.type === 7 && prop.name === 'bind' && prop.arg?.type === 4 && prop.arg.content === 'name') {
+                      const exp = prop.exp?.content || 'default';
+                      const isStringLiteral = /^(['"`])(.*)\1$/.test(exp);
+                      if (isStringLiteral) {
+                        slotName = exp.slice(1, -1);
+                      } else {
+                        slotName = exp;
+                      }
+                    }
+                  }
+                }
+                declaredSlots.push(slotName);
+              }
+
+              // Collect child component usages
+              const passedProps: string[] = [];
+              const subscribedEvents: string[] = [];
+              const filledSlots: string[] = [];
+              let hasDynamicProps = false;
+              let hasDynamicEvents = false;
+
+              if (node.props) {
+                for (const prop of node.props) {
+                  if (prop.type === 7) { // Directives
+                    if (prop.name === 'bind') {
+                      if (prop.arg && prop.arg.type === 4) {
+                        passedProps.push(prop.arg.content);
+                      } else {
+                        hasDynamicProps = true;
+                      }
+                    } else if (prop.name === 'on') {
+                      if (prop.arg && prop.arg.type === 4) {
+                        subscribedEvents.push(prop.arg.content);
+                      } else {
+                        hasDynamicEvents = true;
+                      }
+                    } else if (prop.name === 'slot') {
+                      if (prop.arg && prop.arg.type === 4) {
+                        filledSlots.push(prop.arg.content);
+                      } else {
+                        filledSlots.push('default');
+                      }
+                    }
+                  } else if (prop.type === 6) { // Attributes
+                    if (prop.name !== 'name' || tag !== 'slot') {
+                      passedProps.push(prop.name);
+                    }
+                  }
+                }
+              }
+
+              // Examine child elements for slot fills (e.g. <template v-slot:header>)
+              if (node.children && node.children.length > 0) {
+                let hasImplicitDefaultSlot = false;
+                for (const child of node.children) {
+                  if (child.type === 1) {
+                    if (child.tag === 'template') {
+                      let templateSlotName: string | null = null;
+                      if (child.props) {
+                        for (const prop of child.props) {
+                          if (prop.type === 7 && prop.name === 'slot') {
+                            templateSlotName = prop.arg && prop.arg.type === 4 ? prop.arg.content : 'default';
+                            break;
+                          }
+                        }
+                      }
+                      if (templateSlotName) {
+                        filledSlots.push(templateSlotName);
+                      } else {
+                        hasImplicitDefaultSlot = true;
+                      }
+                    } else {
+                      hasImplicitDefaultSlot = true;
+                    }
+                  } else if (child.type === 2 || child.type === 5) {
+                    const textContent = child.content?.content || child.content || '';
+                    if (textContent.trim()) {
+                      hasImplicitDefaultSlot = true;
+                    }
+                  }
+                }
+                if (hasImplicitDefaultSlot) {
+                  filledSlots.push('default');
+                }
+              }
+
+              childUsages.push({
+                componentName: tag,
+                passedProps,
+                subscribedEvents,
+                filledSlots: Array.from(new Set(filledSlots)),
+                hasDynamicProps,
+                hasDynamicEvents
+              });
+
+              // Extract identifiers from attributes and directives for graph reachability
               if (node.props) {
                 for (const prop of node.props) {
                   if (prop.exp && prop.exp.content) {
@@ -88,7 +196,9 @@ export function parseFile(filePath: string): ParsedFile {
       scriptContent,
       scriptLang,
       templateTags: Array.from(new Set(templateTags)),
-      hasDynamicComponents
+      hasDynamicComponents,
+      declaredSlots: Array.from(new Set(declaredSlots)),
+      childUsages
     };
   } else {
     const isTs = filePath.endsWith('.ts') || filePath.endsWith('.tsx');
@@ -98,7 +208,9 @@ export function parseFile(filePath: string): ParsedFile {
       scriptContent: content,
       scriptLang: isTs ? 'ts' : 'js',
       templateTags: [],
-      hasDynamicComponents: false
+      hasDynamicComponents: false,
+      declaredSlots: [],
+      childUsages: []
     };
   }
 }
@@ -126,7 +238,6 @@ function getIsPropValue(node: any): { value: string; isStatic: boolean } | null 
       }
       if (prop.type === 7 && prop.name === 'bind' && prop.arg?.type === 4 && prop.arg.content === 'is') { // Directive v-bind:is
         const exp = prop.exp?.content || '';
-        // Check if exp is a string literal (e.g. 'MyButton' or "MyButton")
         const isStringLiteral = /^(['"`])(.*)\1$/.test(exp);
         if (isStringLiteral) {
           const content = exp.slice(1, -1);

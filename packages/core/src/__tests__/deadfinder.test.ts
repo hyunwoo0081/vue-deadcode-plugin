@@ -59,6 +59,17 @@ describe('Vue DeadFinder Core Engine', () => {
 
     const unusedHelper = utilsReport?.symbols.find(s => s.name === 'unusedHelper');
     expect(unusedHelper?.status).toBe('ALIVE');
+
+    const buttonReport = report.files.find(f => f.path.replace(/\\/g, '/').endsWith('src/components/MyButton.vue'));
+    expect(buttonReport?.status).toBe('ALIVE');
+    expect(buttonReport?.unusedProps).toContain('disabled');
+    expect(buttonReport?.unusedProps).toContain('size');
+    expect(buttonReport?.unusedProps).not.toContain('label');
+    expect(buttonReport?.unusedEmits).toContain('change');
+    expect(buttonReport?.unusedEmits).toContain('hover');
+    expect(buttonReport?.unusedEmits).not.toContain('click');
+    expect(buttonReport?.unusedSlots).toContain('icon');
+    expect(buttonReport?.unusedSlots).not.toContain('default');
   });
 
   it('should incrementally update when a file is saved', () => {
